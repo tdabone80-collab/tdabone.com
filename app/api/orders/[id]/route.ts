@@ -3,7 +3,7 @@ import { db } from '@/lib/db'
 import { orders, tickets } from '@/lib/schema'
 import { eq } from 'drizzle-orm'
 
-export async function GET(req: Request, { params }: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     // Next.js may provide params as a thenable; await it before use per docs
     // https://nextjs.org/docs/messages/sync-dynamic-apis
