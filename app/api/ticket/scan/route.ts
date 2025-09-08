@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { tickets } from '@/lib/schema'
 import { eq } from 'drizzle-orm'
 import { getAuth, clerkClient } from '@clerk/nextjs/server'
+import crypto from 'crypto'
 
 export async function POST(req: Request) {
   try {
@@ -27,8 +28,8 @@ export async function POST(req: Request) {
       }
     }
 
-    const body = await req.json()
-    const { entryToken } = body as { entryToken?: string }
+  const body = await req.json()
+  const { entryToken } = body as { entryToken?: string }
     if (!entryToken) return NextResponse.json({ error: 'missing entryToken' }, { status: 400 })
 
     const rows = await db.select().from(tickets).where(eq(tickets.entryToken, entryToken))
@@ -39,6 +40,47 @@ export async function POST(req: Request) {
 
     const now = new Date()
     await db.update(tickets).set({ checkedInAt: now, status: 'PAID' }).where(eq(tickets.id, ticket.id))
+
+    // Attempt to notify an external webhook about the scan event if configured.
+    try {
+      const webhookUrl = process.env.SCAN_WEBHOOK_URL
+      if (webhookUrl) {
+        // enrich payload with ticket + actor info (attempt to look up email)
+        let scannedBy = ''
+        try {
+          const client = await clerkClient()
+          const user = await client.users.getUser(userId)
+          const primary = (user as unknown as Record<string, unknown>).primaryEmailAddress as Record<string, unknown> | undefined
+          const emails = (user as unknown as Record<string, unknown>).emailAddresses as Array<Record<string, unknown>> | undefined
+          scannedBy = (primary && String(primary.emailAddress)) || (emails && emails[0] && String(emails[0].emailAddress)) || ''
+        } catch {
+          // ignore clerk lookup errors
+        }
+
+        const payload = JSON.stringify({
+          ticketId: ticket.id,
+          entryToken: ticket.entryToken,
+          shortCode: ticket.shortCode,
+          checkedInAt: now.toISOString(),
+          scannedBy,
+        })
+
+        const secret = process.env.SCAN_WEBHOOK_SECRET || ''
+        const signature = secret ? crypto.createHmac('sha256', secret).update(payload).digest('hex') : ''
+
+        // fire-and-forget but await to observe failures in server logs
+        await fetch(webhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(signature ? { 'x-scan-signature': signature } : {}),
+          },
+          body: payload,
+        })
+      }
+    } catch (e) {
+      console.error('scan webhook error', e)
+    }
 
     return NextResponse.json({ ok: true, checkedInAt: now })
   } catch (err) {
